@@ -1,0 +1,382 @@
+---
+title: "Gene Models Obiroi"
+author: "Tom Carroll"
+date: '2023-01-29'
+output: html_document
+---
+
+```{r setup, include=FALSE,cache=TRUE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE,message = FALSE)
+
+require(magrittr)
+require(dplyr)
+require(stringr)
+
+require(DT)
+
+require(GenomicRanges)
+require(GenomicFeatures)
+require(Biostrings)
+require(rtracklayer)
+
+dir.create("outputs_23",showWarnings = FALSE)
+dir.create(file.path("outputs_23","gene_models"),showWarnings = FALSE,recursive = TRUE)
+```
+
+# Current Gene models
+
+## Import Chromosome maps for RU, GenBank and RefSeq
+
+
+```{r chrmap,cache=TRUE,message=FALSE,warning=FALSE,dependson="setup"}
+chr_map_file <- file.path("data","chromosome_map","Ant_ChromMap.xlsx")
+chr_map <- rio::import(chr_map_file)[-1,]
+colnames(chr_map) <- c("RU","RefGene","GenBank")
+rownames(chr_map) <- NULL
+chr_map$RU[chr_map$RU != "MT"] <- paste0("Chr",chr_map$RU[chr_map$RU != "MT"])
+
+datatable(chr_map,elementId = "chrmap")
+```
+
+## Import Gene Models from GTFs
+
+```{r gmimport,cache=TRUE,message=FALSE,warning=FALSE,dependson="chrmap"}
+patrick_gtf_file <- file.path("data","gene_models","Obir.OGS5.2_Patrick.gtf")
+GenBank_gtf_file <- file.path("data","gene_models","GCA_003672135.1_Obir_v5.4_genomic.gtf.gz")
+RefGene_gtf_file <- file.path("data","gene_models","GCF_003672135.1_Obir_v5.4_genomic.gtf.gz")
+
+patrick_gtf <- rtracklayer::import(patrick_gtf_file)
+GenBank_gtf <- rtracklayer::import(GenBank_gtf_file)
+RefGene_gtf <- rtracklayer::import(RefGene_gtf_file)
+```
+
+## Rename chromosomes 
+
+```{r gmrenameseqlevels,cache=TRUE,message=FALSE,warning=FALSE,dependson="gmimport"}
+GenBank_gtf <- renameSeqlevels(GenBank_gtf,
+                             chr_map %>% pull(RU,name = "GenBank"))
+
+RefGene_gtf <- renameSeqlevels(RefGene_gtf,
+                                  chr_map %>% pull(RU,name = "RefGene"))
+```
+
+## Export renamed GenBank and RefSeq GTFs 
+
+```{r gmexport,cache=TRUE,message=FALSE,warning=FALSE,dependson="gmrenameseqlevels"}
+GenBank_gtf_output <- file.path("outputs_23","gene_models","Obiroi_GenBank__5_4_renamed.gtf")
+RefGene_gtf_output <- file.path("outputs_23","gene_models","Obiroi_RefSeq__5_4_renamed.gtf")
+
+rtracklayer::export(GenBank_gtf,GenBank_gtf_output)
+rtracklayer::export(RefGene_gtf,RefGene_gtf_output)
+```
+
+# Comparing GenBank and RefSeq gene models
+
+
+```{r or_genes,cache=TRUE,message=FALSE,warning=FALSE,dependson="gmrenameseqlevels"}
+GenBank_Gene_To_TransMap <- data.frame(
+  Transcripts = GenBank_gtf$orig_transcript_id[grep("Or|Ir|Obp|Csp|Gr|CSP",GenBank_gtf$orig_transcript_id)],
+  Genes =GenBank_gtf$gene_id[grep("Or|Ir|Obp|Csp|Gr|CSP",GenBank_gtf$orig_transcript_id)]
+)
+GenBank_Gene_To_TransMap <- GenBank_Gene_To_TransMap[!GenBank_Gene_To_TransMap %>% duplicated(),]
+GenBank_Gene_To_TransMap %<>% 
+  mutate(Gene_ids=str_remove(Transcripts,".*\\|gene")) %>% 
+  mutate(Gene_ids=str_remove(Gene_ids,"-RA"))
+
+```
+
+## Identify overlaps of GenBank oderant receptor genes to RefSeq gene models
+
+```{r or_checkgtfs,cache=TRUE,message=FALSE,warning=FALSE,dependson="or_genes"}
+name_map <- vector("list")
+name_map_t <- vector("list")
+missing <- vector("character")
+AddedGenes <- GenBank_Gene_To_TransMap$Transcripts
+for(i in 1:length(AddedGenes)){
+  geneOI <- AddedGenes[i]
+  tp_goi <- GenBank_gtf[GenBank_gtf$orig_transcript_id %in% geneOI & GenBank_gtf$type =="exon" ]
+  idofi <- RefGene_gtf[RefGene_gtf %over% tp_goi & RefGene_gtf$type %in% c("exon","CDS")]
+  if(length(idofi) != 0){
+    temp_list <- list()
+    temp_list[[1]] <-  unique(idofi$gene_id)
+    names(temp_list)[1] <- geneOI
+    temp_list2 <- list()
+    temp_list2[[1]] <-  unique(idofi$transcript_id)
+    names(temp_list2)[1] <- geneOI
+    name_map_t <- c(name_map_t,temp_list2)
+  }else{
+    missing <- c(missing,geneOI)
+  }
+}
+
+double_named <- name_map %>%
+  unlist %>%
+  table
+
+double_named <- double_named[double_named > 1]
+
+double_named_t <- name_map_t %>%
+  unlist %>%
+  table
+
+double_named_t <- double_named_t[double_named_t > 1]
+
+```
+
+## Remove transcripts which cover multiple ORs
+
+```{r filter_refseq,cache=TRUE,message=FALSE,warning=FALSE,dependson="or_checkgtfs"}
+RefGene_gtf_filtered <- RefGene_gtf[!RefGene_gtf$transcript_id %in% names(double_named_t)]
+
+RefGene_gtf_filtered_output <- file.path("outputs_23",
+                                         "gene_models",
+                                         "Obiroi_RefSeq__5_4_renamedandfiltered.gtf")
+
+rtracklayer::export(RefGene_gtf_filtered,
+                    con=RefGene_gtf_filtered_output)
+
+```
+
+
+## Build UTRs from RefSeq
+
+```{r utrs_refseq,cache=TRUE,message=FALSE,warning=FALSE,dependson="chrmap"}
+txdb_refseq <- GenomicFeatures::makeTxDbFromGFF("~/Downloads/KipData/GCF_003672135.1_Obir_v5.4_genomic.gtf.gz")
+
+all5UTRs <- GenomicFeatures::fiveUTRsByTranscript(txdb_refseq,use.names=TRUE) %>% unlist
+all3UTRs <- GenomicFeatures::threeUTRsByTranscript(txdb_refseq,use.names=TRUE) %>% unlist
+allUTRs <- c(all5UTRs,all3UTRs)
+allUTRs <- renameSeqlevels(allUTRs,
+                               chr_map %>% pull(RU,name = "RefGene"))
+
+all5UTRs <- renameSeqlevels(all5UTRs,
+                           chr_map %>% pull(RU,name = "RefGene"))
+all3UTRs <- renameSeqlevels(all3UTRs,
+                           chr_map %>% pull(RU,name = "RefGene"))
+
+allCDS <- GenomicFeatures::cdsBy(txdb_refseq,by="tx",use.names=TRUE) %>% unlist
+allCDS <- renameSeqlevels(allCDS,
+                           chr_map %>% pull(RU,name = "RefGene"))
+
+```
+
+## Build UTRs from GenBank
+
+```{r utrs_genbank,cache=TRUE,message=FALSE,warning=FALSE,dependson="chrmap"}
+txdb_GenBank <- GenomicFeatures::makeTxDbFromGFF("~/Downloads/KipData/GCA_003672135.1_Obir_v5.4_genomic.gtf.gz")
+
+GenBank5UTRs <- GenomicFeatures::fiveUTRsByTranscript(txdb_GenBank,use.names=TRUE) %>% unlist
+GenBank3UTRs <- GenomicFeatures::threeUTRsByTranscript(txdb_GenBank,use.names=TRUE) %>% unlist
+GenBankUTRs <- c(GenBank5UTRs,GenBank3UTRs)
+GenBankUTRs <- renameSeqlevels(GenBankUTRs,
+                           chr_map %>% pull(RU,name = "GenBank"))
+GenBank5UTRs <- renameSeqlevels(GenBank5UTRs,
+                            chr_map %>% pull(RU,name = "GenBank"))
+GenBank3UTRs <- renameSeqlevels(GenBank3UTRs,
+                            chr_map %>% pull(RU,name = "GenBank"))
+
+GenBankCDS <- GenomicFeatures::cdsBy(txdb_GenBank,by="tx",use.names=TRUE) %>% unlist
+GenBankCDS <- renameSeqlevels(GenBankCDS,
+                          chr_map %>% pull(RU,name = "GenBank"))
+
+```
+
+## Write UTRs and CDSs to Bed files
+
+```{r write_UTRS,cache=TRUE,message=FALSE,warning=FALSE,dependson=c("utrs_refseq","utrs_genbank")}
+RefSeq_UTRs_file <- file.path("outputs_23","gene_models","RefSeq_UTRs.bed")
+RefSeq_UTRs_file <- file.path("outputs_23","gene_models","RefSeq_CDSs.bed")
+GenBank_UTRs_file <- file.path("outputs_23","gene_models","GenBank_UTRs.bed")
+GenBank_UTRs_file <- file.path("outputs_23","gene_models","GenBank_CDSs.bed")
+
+export.bed(allUTRs,con=RefSeq_UTRs_file)
+export.bed(allCDS,con=RefSeq_UTRs_file)
+export.bed(GenBankUTRs,con=GenBank_UTRs_file)
+export.bed(GenBankCDS,con=GenBank_UTRs_file)
+
+```
+
+## When overlapping, exchange GenBank OR gene models with RefSeq and/or add UTRs to OR genes
+
+```{r update_annotation,cache=TRUE,message=FALSE,warning=FALSE,dependson=c("utrs_refseq","utrs_genbank","filter_refseq")}
+GRlist <- GRangesList()
+transToGene <- GenBank_Gene_To_TransMap %>% pull(Gene_ids,name = "Transcripts")
+
+for(g in 1:length(AddedGenes)){
+#for(g in 13){
+  # g <- 200
+  goi <- AddedGenes[g]
+
+  # Check gene in multispanning in either way
+
+  tp_goi <- GenBank_gtf[GenBank_gtf$orig_transcript_id %in% goi & GenBank_gtf$type =="exon"] %>% sort
+  idofi_a <- RefGene_gtf[RefGene_gtf %over% tp_goi  & RefGene_gtf$type %in% c("exon","CDS")]
+  idofi <- RefGene_gtf[RefGene_gtf$gene_id %in% idofi_a$gene_id  & RefGene_gtf$type %in% c("exon","CDS")]
+  idofi_goi <- GenBank_gtf[GenBank_gtf %over% idofi & !is.na(GenBank_gtf$orig_transcript_id)]
+
+  numberOfGenesSpanningInRefGene <- length(unique(idofi$gene_id))
+  GenesSpanningRefGeneToGenbank <- unique(idofi_goi$orig_transcript_id)
+  GenesSpanningRefGeneToGenbank <- GenesSpanningRefGeneToGenbank[!GenesSpanningRefGeneToGenbank %in% goi]
+
+  numberOfGenesSpanningRefGeneToGenbank <- length(GenesSpanningRefGeneToGenbank)
+
+  if(numberOfGenesSpanningInRefGene == 1 & numberOfGenesSpanningRefGeneToGenbank == 0){
+    new_toi_model <- idofi
+    new_toi_model$gene_id <- transToGene[goi] %>% unname
+    GRlist <- c(GRlist,GRangesList(new_toi_model))
+    message("Copied RefSeq models for gene - ",transToGene[goi] %>% unname)
+  }else if(numberOfGenesSpanningInRefGene == 0){
+    new_toi_model <- tp_goi
+    new_toi_model$gene_id <- transToGene[goi] %>% unname
+    GRlist <- c(GRlist,GRangesList(new_toi_model))
+    message("Copied GenBank models for gene - ",transToGene[goi] %>% unname)
+  }else{
+  transcripts <- GenBank_gtf[GenBank_gtf$orig_transcript_id %in% goi & GenBank_gtf$type =="exon"]$orig_transcript_id %>% unique
+  for(t in 1:length(transcripts)){
+  toi <- transcripts[t]
+  gr_toi <- GenBank_gtf[GenBank_gtf$orig_transcript_id %in% toi & GenBank_gtf$type =="exon"]
+
+  gr_toi <- GRanges(seqnames = unique(seqnames(gr_toi)),
+                    IRanges(
+                      start=min(start(gr_toi)),
+                      end=max(end(gr_toi))
+                      ),
+                    strand = unique(strand(gr_toi))
+                    )
+
+  may_precede <- c(allCDS,all5UTRs,GenBankCDS,GenBank5UTRs)
+  CDS_precede_index <- precede(gr_toi,may_precede,ignore.strand=FALSE)
+  if(!is.na(CDS_precede_index)){
+    CDS_precede <- may_precede[CDS_precede_index]
+  }else{
+    CDS_precede <- NULL
+  }
+  may_follow <- c(allCDS,all3UTRs,GenBankCDS,GenBank3UTRs)
+  CDS_follow_index <- follow(gr_toi,may_follow,ignore.strand=FALSE)
+  if(!is.na(CDS_follow_index)){
+    CDS_follow <- may_follow[CDS_follow_index]
+  }else{
+    CDS_follow <- NULL
+  }
+
+  win_followA <- resize(CDS_follow,width=1, fix="end")
+  win_followB <- resize(gr_toi,width=1, fix="start")
+  if(as.character(strand(win_followB)) == "-"){
+    win_follow <- GRanges(seqnames = seqnames(gr_toi),
+                          IRanges(start=end(win_followB),
+                                  end=end(win_followA)),
+                          strand = "-")
+  }else{
+    win_follow <- GRanges(seqnames = seqnames(gr_toi),
+                          IRanges(start=end(win_followA),
+                                  end=end(win_followB)),
+                          strand = "+")
+  }
+  extra5UTRs <- all5UTRs[all5UTRs %within% win_follow]
+
+  win_precedeA <- resize(CDS_precede,width=1, fix="start")
+  win_precedeB <- resize(gr_toi,width=1, fix="end")
+  if(as.character(strand(win_followB)) == "-"){
+    win_precede <- GRanges(seqnames = seqnames(gr_toi),
+                          IRanges(start=start(win_precedeA),
+                                  end=end(win_precedeB)),
+                          strand = "-")
+  }else{
+    win_precede <- GRanges(seqnames = seqnames(gr_toi),
+                           IRanges(start=start(win_precedeB),
+                                   end=end(win_precedeA)),
+                           strand = "+")
+  }
+  extra3UTRs <- all3UTRs[all3UTRs %within% win_precede]
+  
+  pat_exons <- GenBank_gtf[GenBank_gtf$orig_transcript_id %in% toi & GenBank_gtf$type =="exon"]
+  pat_notexons <- GenBank_gtf[GenBank_gtf$orig_transcript_id %in% toi & GenBank_gtf$type !="exon"]
+  pat_new_exons <- reduce(c(pat_exons,extra3UTRs,extra5UTRs))
+  mcols(pat_new_exons) <- data.frame(source=NA,
+                                     type="exon",
+                                     score=NA,
+                                     phase=NA,
+                                     gene_id=transToGene[goi] %>% unname,
+                                     transcript_id=toi)
+  pat_notexons$gene_id <- transToGene[goi] %>% unname
+  new_toi_model <- c(pat_new_exons,pat_notexons)
+  }
+  GRlist <- c(GRlist,GRangesList(new_toi_model))
+  message(" Done ",toi," for gene - ",goi)
+  }
+  message(g,"Completed transcripts Done for gene - ",goi)
+}
+
+or_gtf <- unlist(GRlist)
+
+```
+
+## Write out new OR gene models
+
+```{r write_newmodels,cache=TRUE,message=FALSE,warning=FALSE,dependson="update_annotation"}
+ors_gtf_file <- file.path("outputs_23","gene_models","ORs.gtf")
+
+export(or_gtf,
+       con = ors_gtf_file)
+
+```
+
+## Write out new OR and other gene models
+
+```{r write_fullnewmodels,cache=TRUE,message=FALSE,warning=FALSE,dependson="update_annotation"}
+
+RefGene_And_or_gtf_file <- file.path("outputs_23","gene_models","RefSeq_And_ORs.gtf")
+
+RefGene_And_or_gtf <- RefGene_gtf_filtered[!RefGene_gtf_filtered$gene_id %in% RefGene_gtf_filtered[RefGene_gtf_filtered %over% or_gtf]$gene_id,]
+RefGene_And_or_gtf <-c(RefGene_And_or_gtf,or_gtf)
+RefGene_And_or_gtf$gene <- RefGene_And_or_gtf$gene_id 
+
+export(RefGene_And_or_gtf,
+       con = RefGene_And_or_gtf_file)
+```
+
+## Write out new OR and other gene models with MT genes
+
+```{r write_fullnewmodels_withMT,cache=TRUE,message=FALSE,warning=FALSE,dependson="write_fullnewmodels"}
+
+RefGene_GenBankMt_And_or_gtf_file <- file.path("outputs_23","gene_models","RefSeq_With_GenBank_MT_And_ORs.gtf")
+GenBank_gtf_MT <- GenBank_gtf[seqnames(GenBank_gtf) %in% "MT"]
+GenBank_gtf_MT$gene_id <- paste0("MT-",GenBank_gtf_MT$gene_id)
+RefGene_GenBankMt_And_or_gtf <- c(RefGene_And_or_gtf,GenBank_gtf_MT)
+RefGene_GenBankMt_And_or_gtf$gene <- RefGene_GenBankMt_And_or_gtf$gene_id
+export(RefGene_GenBankMt_And_or_gtf,
+       con = RefGene_GenBankMt_And_or_gtf_file)
+```
+
+# Create renamed FASTA files
+
+## Read in GenBank FASTA and rename chromosomes 
+
+```{r read_fa,cache=TRUE,message=FALSE,warning=FALSE,dependson="chrmap"}
+
+genome_GenBank_file <- file.path("data","genomes","GCA_003672135.1_Obir_v5.4_genomic.fna.gz")
+
+genome_GenBank <- readDNAStringSet(genome_GenBank_file)
+names(genome_GenBank) <- gsub(" .*","",genome_GenBank %>% names)
+
+chrmapvec <- chr_map %>% pull(RU,name = "GenBank")
+names(genome_GenBank)[names(genome_GenBank) %in% names(chrmapvec)] <- chrmapvec[names(genome_GenBank)[names(genome_GenBank) %in% names(chrmapvec)]]
+
+```
+
+## Write GenBank FASTA with renamed chromosomes 
+
+```{r write_fa,cache=TRUE,message=FALSE,warning=FALSE,dependson="read_fa"}
+
+dir.create(file.path("outputs_23","genomes"),showWarnings = FALSE,recursive = TRUE)
+
+genome_GenBank_file <- file.path("outputs_23","genomes","GenBank.fa")
+
+genome_GenBank <- writeXStringSet(genome_GenBank,genome_GenBank_file)
+
+
+```
+
+```{r}
+sessionInfo()
+```

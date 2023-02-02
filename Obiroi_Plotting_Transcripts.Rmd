@@ -1,0 +1,132 @@
+---
+title: "Plot_Transcripts"
+author: "Tom Carroll"
+date: '2023-01-31'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Read in transcripts
+
+## Import Chromosome maps for RU, GenBank and RefSeq
+
+
+```{r chrmap,cache=TRUE,message=FALSE,warning=FALSE,dependson="setup"}
+chr_map_file <- file.path("data","chromosome_map","Ant_ChromMap.xlsx")
+chr_map <- rio::import(chr_map_file)[-1,]
+colnames(chr_map) <- c("RU","RefGene","GenBank")
+rownames(chr_map) <- NULL
+chr_map$RU[chr_map$RU != "MT"] <- paste0("Chr",chr_map$RU[chr_map$RU != "MT"])
+
+datatable(chr_map,elementId = "chrmap")
+```
+
+## Import Gene Models from GTFs
+
+```{r gmimport,cache=TRUE,message=FALSE,warning=FALSE,dependson="chrmap"}
+patrick_gtf_file <- file.path("data","gene_models","Obir.OGS5.2_Patrick.gtf")
+
+GenBank_gtf_output <- file.path("outputs_23/","gene_models","Obiroi_GenBank__5_4_renamed.gtf")
+RefGene_gtf_output <- file.path("outputs_23","gene_models","Obiroi_RefSeq__5_4_renamed.gtf")
+
+
+BRC_gtf_file <- file.path("outputs_23","gene_models","RefSeq_With_GenBank_MT_And_ORs.gtf")
+
+patrick_gtf <- rtracklayer::import(patrick_gtf_file)
+GenBank_gtf <- rtracklayer::import(GenBank_gtf_output)
+RefGene_gtf <- rtracklayer::import(RefGene_gtf_output)
+BRC_gtf <- rtracklayer::import(BRC_gtf_file)
+```
+
+
+
+# Comparing GenBank and RefSeq gene models
+
+
+```{r or_genes,cache=TRUE,message=FALSE,warning=FALSE,dependson="gmrenameseqlevels"}
+GenBank_Gene_To_TransMap <- data.frame(
+  Transcripts = GenBank_gtf$orig_transcript_id[grep("Or|Ir|Obp|Csp|Gr|CSP",GenBank_gtf$orig_transcript_id)],
+  Genes =GenBank_gtf$gene_id[grep("Or|Ir|Obp|Csp|Gr|CSP",GenBank_gtf$orig_transcript_id)]
+)
+GenBank_Gene_To_TransMap <- GenBank_Gene_To_TransMap[!GenBank_Gene_To_TransMap %>% duplicated(),]
+GenBank_Gene_To_TransMap %<>% 
+  mutate(Gene_ids=str_remove(Transcripts,".*\\|gene")) %>% 
+  mutate(Gene_ids=str_remove(Gene_ids,"-RA"))
+
+```
+
+## Identify overlaps of GenBank oderant receptor genes to RefSeq gene models
+
+```{r or_checkgtfs,cache=TRUE,message=FALSE,warning=FALSE,dependson="or_genes"}
+AddedGenes <- GenBank_Gene_To_TransMap$Transcripts
+```
+
+
+```{r}
+require(Gviz)
+options(ucscChromosomeNames=FALSE)
+
+win <- 1000
+BRC_txdb <- makeTxDbFromGFF(BRC_gtf_file)
+RefGene_txdb <- makeTxDbFromGFF(RefGene_gtf_output)
+GenBank_txdb <- makeTxDbFromGFF(GenBank_gtf_output)
+axisT <- GenomeAxisTrack()
+customFromBRC <- GeneRegionTrack(BRC_txdb,
+                                 name = "BRC",fill="salmon")
+
+customFromRefSeq <- GeneRegionTrack(RefGene_txdb,
+                                    name = "Refseq",fill="darkblue")
+customFromGenBank <- GeneRegionTrack(GenBank_txdb,
+                                    name = "GenBank",fill="darkgreen")
+
+for(i in 1:length(AddedGenes)){
+  goi <- GenBank_Gene_To_TransMap[GenBank_Gene_To_TransMap[,1] %in% AddedGenes[i],3]
+  toPlot <- GRanges(seqnames = unique(seqnames(BRC_gtf[BRC_gtf$gene_id %in% goi])),
+                    IRanges(min(start(BRC_gtf[BRC_gtf$gene_id %in% goi])),
+                            max(end(BRC_gtf[BRC_gtf$gene_id %in% goi]))
+                            )
+                    )
+  toBigWig <- toPlot
+  start(toBigWig) <- start(toBigWig)-10000
+  end(toBigWig) <- end(toBigWig)+10000
+  bw <- rtracklayer::import.bw("/Users/thomascarroll/Downloads/bigWigs\ 2/BRC_S1.bw",BigWigSelection(ranges = toBigWig),as="GRanges")
+  accDT <- DataTrack(bw,chomosome=unique(seqnames(toPlot)),type="l") 
+  
+  pdf(file = file.path("outputs_23",paste(goi,".pdf")))
+  ncols <- 1
+  nrows <- 2
+  grid.newpage()
+  pushViewport(viewport(layout = grid.layout(nrows, ncols)))
+  
+  # pushViewport(viewport(layout.pos.col = 1,
+  #                         layout.pos.row = 1))
+  # plotTracks(c(axisT,accDT,customFromBRC,customFromGenBank,customFromRefSeq),
+  #            from = start(toPlot)-50000,
+  #            to=end(toPlot)+50000,chromosome = as.character(unique(seqnames(toPlot))),
+  #            transcriptAnnotation = "Gene",stacking="pack",add = TRUE)
+  # popViewport(1)
+  
+  pushViewport(viewport(layout.pos.col = 1,
+                          layout.pos.row = 1))
+  
+  plotTracks(c(axisT,accDT,customFromBRC,customFromGenBank,customFromRefSeq),
+             from = start(toPlot)-10000,
+             to=end(toPlot)+10000,chromosome = unique(seqnames(toPlot)),
+             transcriptAnnotation = "Gene",stacking="pack",add = TRUE)
+  popViewport(1)
+  pushViewport(viewport(layout.pos.col = 1,
+                          layout.pos.row = 2))
+  
+  plotTracks(c(axisT,customFromBRC,customFromGenBank,customFromRefSeq),
+             from = start(toPlot)-100,
+             to=end(toPlot)+100,chromosome = unique(seqnames(toPlot)),
+             transcriptAnnotation = "Gene",stacking="pack",add = TRUE)
+  popViewport(1)
+
+  dev.off()
+  print(i)
+}
+```
